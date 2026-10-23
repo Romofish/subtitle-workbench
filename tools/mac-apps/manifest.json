@@ -1,0 +1,60 @@
+{
+  "platform": "macOS Apple Silicon",
+  "apps": [
+    {
+      "name": "Subtitle Edit",
+      "version": "5.3.0",
+      "architecture": "arm64",
+      "release_url": "https://github.com/SubtitleEdit/subtitleedit/releases/tag/v5.3.0",
+      "url": "https://github.com/SubtitleEdit/subtitleedit/releases/download/v5.3.0/SubtitleEdit-macOS-ARM64.dmg",
+      "file": "SubtitleEdit-macOS-ARM64-5.3.0.dmg",
+      "bytes": 135167783,
+      "sha256": "8cf1535b1984f10557076324245f716d6abd858f71c59ef2ca2f474079fc404b",
+      "installed_app": "Subtitle Edit.app"
+    },
+    {
+      "name": "LosslessCut",
+      "version": "3.70.1",
+      "architecture": "arm64",
+      "release_url": "https://github.com/mifi/lossless-cut/releases/tag/v3.70.1",
+      "url": "https://github.com/mifi/lossless-cut/releases/download/v3.70.1/LosslessCut-mac-arm64.dmg",
+      "file": "LosslessCut-mac-arm64-3.70.1.dmg",
+      "bytes": 165847881,
+      "sha256": "82964e13ca65beeee508fbdb27fe823121701748b8b4023800bdcf701183d2ea",
+      "installed_app": "LosslessCut.app"
+    },
+    {
+      "name": "IINA",
+      "version": "1.5.0",
+      "architecture": "universal (includes arm64)",
+      "release_url": "https://iina.io/download/",
+      "url": "https://dl.iina.io/IINA.v1.5.0.dmg",
+      "file": "IINA.v1.5.0.dmg",
+      "bytes": 113048935,
+      "sha256": "8fad50479b10e09645053457cec46bd53d054ced2242cfe68f74586735a20dc7",
+      "installed_app": "IINA.app"
+    },
+    {
+      "name": "Aegisub",
+      "version": "3.5.1",
+      "architecture": "arm64",
+      "release_url": "https://github.com/TypesettingTools/Aegisub/releases/tag/v3.5.1",
+      "url": "https://github.com/TypesettingTools/Aegisub/releases/download/v3.5.1/Aegisub-3.5.1-arm64.dmg",
+      "file": "Aegisub-3.5.1-arm64.dmg",
+      "bytes": 29740389,
+      "sha256": "593ecfec16e9d318677bb123cb382eace1b81e75f58716f0f3e3b1df31e752e6",
+      "installed_app": "Aegisub.app"
+    },
+    {
+      "name": "HandBrake",
+      "version": "1.11.2",
+      "architecture": "universal (includes arm64)",
+      "release_url": "https://github.com/HandBrake/HandBrake/releases/tag/1.11.2",
+      "url": "https://github.com/HandBrake/HandBrake/releases/download/1.11.2/HandBrake-1.11.2.dmg",
+      "file": "HandBrake-1.11.2.dmg",
+      "bytes": 47978117,
+      "sha256": "4afe27aaa77a7bbb0dcda1a335d96a5f53649f2649fb84de6982ffecc35de9d7",
+      "installed_app": "HandBrake.app"
+    }
+  ]
+}
