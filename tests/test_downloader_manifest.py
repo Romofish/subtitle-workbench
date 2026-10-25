@@ -1,5 +1,7 @@
 """Offline checks: python3 -m unittest discover -s tests -p 'test_downloader_manifest.py' -v"""
 
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -7,9 +9,12 @@ import subprocess
 import tempfile
 import unittest
 import uuid
+import sys
+from unittest.mock import patch
 
 
-SCRIPT = Path(__file__).resolve().parents[1] / 'youtube_download.command'
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'scripts'))
+import downloader
 
 
 class DownloaderManifestTests(unittest.TestCase):
@@ -23,7 +28,8 @@ class DownloaderManifestTests(unittest.TestCase):
         self.output.mkdir()
         self.bin = self.root / 'bin'
         self.bin.mkdir()
-        self.executable('ffprobe', '#!/bin/sh\nprintf \'{"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"},{"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"tha"}}]}\\n\'\n')
+        self.commands = {}
+        self.executable('ffprobe', 'import json\nprint(json.dumps({"streams":[{"index":0,"codec_type":"video","codec_name":"h264"},{"index":1,"codec_type":"audio","codec_name":"aac"},{"index":2,"codec_type":"subtitle","codec_name":"subrip","tags":{"language":"tha"}}]}))\n')
         self.media = self.output / 'Example [video123].mkv'
         self.media.write_bytes(b'fake-media')
         self.before = {'id': 'video123', 'title': 'Example', 'extractor_key': 'Youtube',
@@ -33,9 +39,9 @@ class DownloaderManifestTests(unittest.TestCase):
         self.final = {'id': 'video123', 'filepath': str(self.media), 'requested_subtitles': {}}
 
     def executable(self, name, content):
-        path = self.bin / name
-        path.write_text(content)
-        path.chmod(0o755)
+        path = self.bin / (name + ".py")
+        path.write_text(content, encoding="utf-8")
+        self.commands[name] = [sys.executable, "-X", "utf8", str(path)]
 
     def track(self, language, catalog, query, saved=True):
         track = {'ext': 'vtt', 'url': 'https://caption.example/timedtext?' + query + '&signature=PRIVATE'}
@@ -47,23 +53,31 @@ class DownloaderManifestTests(unittest.TestCase):
         self.final['requested_subtitles'][language] = {'ext': 'srt', 'filepath': str(path)}
         return track
 
-    def shell(self, body, *args, env=None):
-        command = 'source "$1"; shift; export PATH="$1:$PATH"; shift; ' + body
-        return subprocess.run(['/bin/bash', '-c', command, 'test', str(SCRIPT), str(self.bin), *args],
-                              text=True, capture_output=True, env={**os.environ, **(env or {})})
+    def invoke(self, operation, *args, env=None):
+        output, errors = io.StringIO(), io.StringIO()
+        environment = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8", **(env or {})}
+        with patch.dict(os.environ, environment, clear=True), contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            if operation == "manifest":
+                code = downloader.write_source_manifest(*args, ffprobe_command=self.commands['ffprobe'])
+            elif operation == "subtitles":
+                code = downloader.download_subtitle_phase(*args, ytdlp_command=self.commands['yt-dlp'])
+            else:
+                tools = downloader.DownloadTools(self.commands['yt-dlp'], self.commands['ffprobe'], [])
+                code = downloader.download_video(args[0], args[1], args[2] == 'yes', tools=tools)
+        return subprocess.CompletedProcess(operation, code, output.getvalue(), errors.getvalue())
 
     def manifest(self, status=0, enabled='yes', final=True, downloaded=None, run_id=None, allow_translated='no'):
-        (self.scratch / 'selected.jsonl').write_text(json.dumps(self.before) + '\n')
+        (self.scratch / 'selected.jsonl').write_text(json.dumps(self.before) + '\n', encoding='utf-8')
         if final:
-            (self.scratch / 'after_move.jsonl').write_text(json.dumps(self.final) + '\n')
+            (self.scratch / 'after_move.jsonl').write_text(json.dumps(self.final) + '\n', encoding='utf-8')
         if downloaded:
-            (self.scratch / 'before_dl.jsonl').write_text(json.dumps(downloaded) + '\n')
-        result = self.shell('write_source_manifest "$@"', str(self.scratch),
+            (self.scratch / 'before_dl.jsonl').write_text(json.dumps(downloaded) + '\n', encoding='utf-8')
+        result = self.invoke('manifest', str(self.scratch),
                             'https://www.youtube.com/watch?v=video123', enabled, 'th.*,zh.*,en.*', str(status),
                             '2026.08.19-test', run_id or 'test-' + uuid.uuid4().hex, allow_translated)
         suffix = '.sources.json' if status == 0 and final else '.sources.failed.json'
         path = self.media.with_suffix(suffix)
-        document = json.loads(path.read_text()) if path.exists() else None
+        document = json.loads(path.read_text(encoding='utf-8')) if path.exists() else None
         return result, document
 
     def test_sources_use_selected_catalog_and_explicit_evidence(self):
@@ -86,7 +100,7 @@ class DownloaderManifestTests(unittest.TestCase):
         self.assertEqual(doc['media']['tracks']['subtitle'][0]['language'], 'tha')
         self.assertEqual(doc['subtitles']['saved_srt_count'], 4)
         self.assertEqual(doc['tools']['yt_dlp'], '2026.08.19-test')
-        self.assertEqual(json.loads(Path(doc['history_path']).read_text()), doc)
+        self.assertEqual(json.loads(Path(doc['history_path']).read_text(encoding='utf-8')), doc)
         self.assertEqual(regular['ext'], 'vtt')
 
     def test_selected_track_not_matching_catalog_stays_unknown(self):
@@ -111,7 +125,7 @@ class DownloaderManifestTests(unittest.TestCase):
         _, doc = self.manifest(enabled='no')
         self.assertEqual(doc['subtitles']['status'], 'disabled')
         self.assertEqual(doc['media']['tracks']['subtitle'][0]['codec_name'], 'subrip')
-        self.assertEqual(json.loads(first_history.read_text())['subtitles']['status'], 'no_matching_subtitles')
+        self.assertEqual(json.loads(first_history.read_text(encoding='utf-8'))['subtitles']['status'], 'no_matching_subtitles')
         self.assertEqual(len(list((self.output / 'sources-history').glob('*.json'))), 2)
 
     def test_converted_subtitle_resolves_captured_move_mapping(self):
@@ -141,7 +155,7 @@ class DownloaderManifestTests(unittest.TestCase):
         downloaded = {'id': 'video123', 'requested_subtitles': {'th': {'ext': 'vtt', 'filepath': str(vtt)}}}
         result, doc = self.manifest(status=1, final=False, downloaded=downloaded)
         self.assertEqual(result.returncode, 1)
-        self.assertEqual(json.loads(success.read_text()), {'previous_success': True})
+        self.assertEqual(json.loads(success.read_text(encoding='utf-8')), {'previous_success': True})
         self.assertFalse(doc['media']['exists'])
         self.assertEqual(doc['subtitles']['files'][0]['status'], 'downloaded_conversion_or_embedding_not_confirmed')
         self.assertEqual(doc['subtitles']['saved_srt_count'], 0)
@@ -153,7 +167,7 @@ class DownloaderManifestTests(unittest.TestCase):
         self.assertEqual(doc['download']['status'], 'failed_or_incomplete')
 
     def test_ffprobe_failure_keeps_media_and_records_uncertainty(self):
-        self.executable('ffprobe', '#!/bin/sh\nexit 1\n')
+        self.executable('ffprobe', 'import sys\nsys.exit(1)\n')
         result, doc = self.manifest()
         self.assertEqual(result.returncode, 0)
         self.assertEqual(doc['media']['probe_status'], 'failed')
@@ -162,10 +176,10 @@ class DownloaderManifestTests(unittest.TestCase):
     def test_simulate_does_not_request_snapshots_or_write_artifacts(self):
         capture = self.root / 'args.json'
         self.executable('yt-dlp', '#!/usr/bin/env python3\nimport json, os, sys\nopen(os.environ["TEST_ARGS"], "w").write(json.dumps(sys.argv[1:]))\n')
-        result = self.shell('download_video "https://www.youtube.com/watch?v=video123" yes yes',
+        result = self.invoke('download', 'https://www.youtube.com/watch?v=video123', 'yes', 'yes',
                             env={'TEST_ARGS': str(capture), 'YOUTUBE_DOWNLOAD_DIR': str(self.output)})
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        args = json.loads(capture.read_text())
+        args = json.loads(capture.read_text(encoding='utf-8'))
         self.assertIn('--simulate', args)
         self.assertNotIn('--print-to-file', args)
         self.assertIn('--no-write-subs', args)
@@ -177,10 +191,10 @@ class DownloaderManifestTests(unittest.TestCase):
     def test_download_uses_separate_run_paths_and_cleans_private_metadata(self):
         capture = self.root / 'args.json'
         self.executable('yt-dlp', '#!/usr/bin/env python3\nimport json, os, sys\nopen(os.environ["TEST_ARGS"], "w").write(json.dumps(sys.argv[1:]))\nsys.exit(9)\n')
-        result = self.shell('download_video "https://www.youtube.com/watch?v=video123" yes no',
+        result = self.invoke('download', 'https://www.youtube.com/watch?v=video123', 'yes', 'no',
                             env={'TEST_ARGS': str(capture), 'YOUTUBE_DOWNLOAD_DIR': str(self.output)})
         self.assertEqual(result.returncode, 9)
-        args = json.loads(capture.read_text())
+        args = json.loads(capture.read_text(encoding='utf-8'))
         templates = [args[index + 1] for index, value in enumerate(args) if value == '-o']
         self.assertFalse(any(template.startswith('subtitle:') for template in templates))
         self.assertEqual(templates[0], '%(title)s [%(id)s]/%(title)s [%(id)s].%(ext)s')
@@ -189,7 +203,7 @@ class DownloaderManifestTests(unittest.TestCase):
         self.assertIn('--no-embed-subs', args)
         directories = [args[index + 1] for index, value in enumerate(args) if value == '-P']
         self.assertIn('home:' + str(self.output), directories)
-        self.assertTrue(any(path.startswith('temp:') and '.yt-dlp-work/' in path for path in directories))
+        self.assertTrue(any(path.startswith('temp:') and '.yt-dlp-work' in Path(path[5:]).parts for path in directories))
         for index, arg in enumerate(args):
             if arg == '--print-to-file':
                 self.assertFalse(Path(args[index + 2]).parent.exists())
@@ -201,7 +215,7 @@ import json, os
 from pathlib import Path
 import sys
 args=sys.argv[1:]
-info=json.loads(Path(args[args.index('--load-info-json')+1]).read_text())
+info=json.loads(Path(args[args.index('--load-info-json')+1]).read_text(encoding='utf-8'))
 tracks={**info.get('automatic_captions',{}),**info.get('subtitles',{})}
 language=next(iter(tracks))
 with open(os.environ['CALLS'], 'a') as handle: handle.write(json.dumps({'language':language,'args':args})+'\\n')
@@ -219,14 +233,14 @@ if mode!='missing_stage':
 """)
 
     def run_subtitle_phase(self, allow='no', patterns='th.*,zh.*,en.*', behaviors=None):
-        (self.scratch / 'media-info.jsonl').write_text(json.dumps(self.before) + '\n')
-        (self.scratch / 'after_move.jsonl').write_text(json.dumps(self.final) + '\n')
+        (self.scratch / 'media-info.jsonl').write_text(json.dumps(self.before) + '\n', encoding='utf-8')
+        (self.scratch / 'after_move.jsonl').write_text(json.dumps(self.final) + '\n', encoding='utf-8')
         calls = self.root / 'calls.jsonl'
-        result = self.shell('download_subtitle_phase "$@"', str(self.scratch), str(self.output), patterns,
+        result = self.invoke('subtitles', str(self.scratch), str(self.output), patterns,
                             allow, 'current-run', '',
                             env={'CALLS': str(calls), 'BEHAVIORS': json.dumps(behaviors or {})})
-        rows = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
-        return result, json.loads((self.scratch / 'subtitle-results.json').read_text()), rows
+        rows = [json.loads(line) for line in calls.read_text(encoding='utf-8').splitlines()] if calls.exists() else []
+        return result, json.loads((self.scratch / 'subtitle-results.json').read_text(encoding='utf-8')), rows
 
     def test_default_policy_keeps_distinct_original_asr_and_excludes_translation_duplicates(self):
         self.fake_subtitle_tool()
@@ -296,6 +310,25 @@ if mode!='missing_stage':
         self.assertEqual(phase['files'][1]['status'], 'saved_srt')
         _, doc = self.manifest(run_id='current-run')
         self.assertEqual(doc['subtitles']['status'], 'partial')
+        self.assertEqual(doc['subtitles']['saved_srt_count'], 1)
+
+    def test_unicode_paths_and_metadata_survive_subtitles_and_manifest(self):
+        self.fake_subtitle_tool()
+        self.output = self.root / '中文 ไทย output'
+        self.output.mkdir()
+        self.media = self.output / '标题 สวัสดี [video123].mkv'
+        self.media.write_bytes(b'fake-media')
+        self.before.update(title='标题 สวัสดี', _filename=str(self.media))
+        self.final['filepath'] = str(self.media)
+        self.track('th', 'subtitles', 'lang=th')
+        result, phase, _ = self.run_subtitle_phase()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        saved_path = Path(phase['files'][0]['path'])
+        self.assertEqual(saved_path.parent, self.output)
+        self.assertIn('标题 สวัสดี', saved_path.name)
+        result, doc = self.manifest(run_id='current-run')
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(doc['source']['title'], '标题 สวัสดี')
         self.assertEqual(doc['subtitles']['saved_srt_count'], 1)
 
 

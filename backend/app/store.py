@@ -14,6 +14,28 @@ from typing import Any, Callable
 from fastapi import HTTPException
 
 
+ANNOTATION_DEFAULTS = {'speaker': '', 'overlap': False, 'unclear': False}
+
+
+def normalize_annotations(project: dict) -> dict:
+    """Add optional annotation defaults without rewriting old revision numbers."""
+    def fill(item):
+        if isinstance(item, dict):
+            for name, value in ANNOTATION_DEFAULTS.items():
+                item.setdefault(name, value)
+
+    for item in project.get('segments', []):
+        fill(item)
+    for track in project.get('reference_tracks', []):
+        for item in track.get('segments', []):
+            fill(item)
+    for transaction in project.get('revisions', []):
+        for change in transaction.get('changes', []):
+            fill(change.get('before'))
+            fill(change.get('after'))
+    return project
+
+
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -49,7 +71,7 @@ def _read(conn: sqlite3.Connection, project_id: str) -> dict:
     row = conn.execute('SELECT document FROM projects WHERE project_id=?', (project_id,)).fetchone()
     if row is None:
         raise HTTPException(404, 'Project not found')
-    return json.loads(row['document'])
+    return normalize_annotations(json.loads(row['document']))
 
 
 def read_project(project_id: str) -> dict:
@@ -58,6 +80,7 @@ def read_project(project_id: str) -> dict:
 
 
 def create_project(project: dict) -> dict:
+    normalize_annotations(project)
     with closing(connect()) as conn:
         conn.execute('INSERT INTO projects VALUES (?,?,?,?)', (project['project_id'], project['name'], project['updated_at'], json.dumps(project, ensure_ascii=False)))
         conn.commit()

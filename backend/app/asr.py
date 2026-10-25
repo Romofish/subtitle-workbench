@@ -16,17 +16,23 @@ from fastapi import HTTPException
 
 from . import media as media_utils
 from .store import connect, data_dir, now, uid
-from .subtitles import parse_subtitles, refresh_risks
+from .subtitles import TIMING, parse_subtitles, refresh_risks, time_ms, timestamp
+from .asr_quality import QUALITY_RULE_VERSION, asr_quality_warnings
 
 ROOT = Path(__file__).resolve().parents[2]
 ACTIVE = ('queued', 'running')
 
 
 def configuration() -> dict:
-    base = ROOT / 'tools' / 'asr'
-    engine = base / 'bin' / 'whisper-cli'
+    default = (Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData/Local')) /
+               'Programs/SubtitleWorkbench/asr') if os.name == 'nt' else ROOT / 'tools' / 'asr'
+    base = Path(os.environ.get('SUBTITLE_ASR_DIR', default)).expanduser().resolve()
+    engine = base / 'bin' / ('whisper-cli.exe' if os.name == 'nt' else 'whisper-cli')
     model = base / 'models' / 'ggml-large-v3-turbo-q5_0.bin'
+    device = os.environ.get('SUBTITLE_ASR_DEVICE', 'auto').lower()
     reasons = []
+    if device not in ('auto', 'cpu'):
+        reasons.append('SUBTITLE_ASR_DEVICE 只支持 auto 或 cpu')
     if not engine.is_file() or not os.access(engine, os.X_OK):
         reasons.append('本地识别引擎未安装，请运行 scripts/setup_asr.py')
     if not model.is_file() or model.stat().st_size < 1024 * 1024:
@@ -35,7 +41,8 @@ def configuration() -> dict:
         reasons.append('未找到 FFmpeg / ffprobe')
     return {'ready': not reasons, 'engine': 'whisper.cpp', 'model': 'large-v3-turbo-q5_0',
             'model_label': 'Whisper large-v3-turbo · 多语言 · Q5', 'local': True,
-            'reasons': reasons, 'engine_path': str(engine), 'model_path': str(model)}
+            'reasons': reasons, 'engine_path': str(engine), 'model_path': str(model),
+            'device': device, 'manifest_path': str(base / 'manifest.json')}
 
 
 def _connect():
@@ -183,6 +190,71 @@ def _engine_progress(text: str) -> int | None:
     return min(95, 10 + int(values[-1]) * 85 // 100) if values else None
 
 
+def parse_engine_subtitles(raw: bytes, duration_ms: int | None) -> tuple[list[dict], list[dict]]:
+    """Represent zero-duration engine cues as explicit, provisional 1 ms windows.
+
+    Keep every cue and its words. The untouched SRT/JSON remain source evidence;
+    external user imports still use the strict parser with no such adjustment.
+    This is an import repair, not forced alignment or a synchronization claim.
+    """
+    try:
+        text = raw.decode('utf-8-sig').replace('\r\n', '\n').replace('\r', '\n')
+    except UnicodeDecodeError:
+        # Preserve the standard parser's clear encoding error.
+        return parse_subtitles(raw, 'transcription.srt'), []
+    blocks = re.split(r'\n[ \t]*\n', text.strip())
+    repairs = []
+    cue_index = 0
+    for index, block in enumerate(blocks):
+        lines = block.splitlines()
+        if not lines:
+            continue
+        cue_index += 1
+        timing_index = next((i for i, line in enumerate(lines[:2]) if '-->' in line), None)
+        if timing_index is None:
+            continue
+        match = TIMING.match(lines[timing_index])
+        if match is None:
+            continue
+        try:
+            start, end = time_ms(match[1]), time_ms(match[2])
+        except (ValueError, TypeError):
+            continue
+        if start != end or start < 0:
+            continue
+        repaired_start, repaired_end = (start - 1, start) if start > 0 and start == duration_ms else (start, start + 1)
+        lines[timing_index] = f'{timestamp(repaired_start, "srt")} --> {timestamp(repaired_end, "srt")}'
+        blocks[index] = '\n'.join(lines)
+        repairs.append({'cue_index': cue_index, 'original_start_ms': start, 'original_end_ms': end,
+                        'start_ms': repaired_start, 'end_ms': repaired_end,
+                        'reason': 'engine_zero_duration', 'method': 'provisional_1ms_review_window'})
+    segments = parse_subtitles(('\n\n'.join(blocks) + '\n').encode('utf-8'), 'transcription.srt')
+    for item in segments:
+        item['asr_warnings'] = asr_quality_warnings(item['source_text'], item['end_ms'] - item['start_ms'])
+    for repair in repairs:
+        item = segments[repair['cue_index'] - 1]
+        repair['segment_id'] = item['segment_id']
+        item['asr_warnings'].append('asr_timing_repaired')
+        item['asr_timing_reviewed'] = False
+    return segments, repairs
+
+
+def preserve_diagnostics(task_id: str, directory: Path) -> Path | None:
+    """Keep bounded engine evidence on failure, without keeping uploaded media/WAV."""
+    files = [directory / name for name in ('transcription.srt', 'transcription.json', 'asr.log', 'ffmpeg.log')]
+    if not any(path.is_file() for path in files):
+        return None
+    destination = data_dir() / 'asr-diagnostics' / task_id
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        for path in files:
+            if path.is_file():
+                shutil.copy2(path, destination / path.name)
+        return destination
+    except OSError:
+        return None
+
+
 def _finish(task: dict, media: dict, segments: list[dict], raw: bytes, result_json: dict, config: dict):
     task_id = task['task_id']
     pid = uid()
@@ -194,7 +266,8 @@ def _finish(task: dict, media: dict, segments: list[dict], raw: bytes, result_js
         target = directory / Path(task['_path']).name
         os.link(task['_path'], target)
         (directory / 'original-subtitle').write_bytes(raw)
-        (directory / 'asr-result.json').write_text(json.dumps(result_json, ensure_ascii=False), encoding='utf-8')
+        shutil.copyfile(data_dir() / 'transcriptions' / task_id / 'transcription.json',
+                        directory / 'asr-result.json')
         media.update(path=str(target), url=f'/api/projects/{pid}/media')
         detected = (result_json.get('result') or {}).get('language')
         language = task['language'] if task['language'] != 'auto' else detected or 'unknown'
@@ -202,10 +275,17 @@ def _finish(task: dict, media: dict, segments: list[dict], raw: bytes, result_js
                       'local': True, 'requested_language': task['language'], 'detected_language': detected,
                       'audio_track': media['selected_audio_track'], 'media_sha256': media['sha256'],
                       'timeline': 'media_origin_milliseconds', 'mixed_language_review_required': True}
-        manifest = ROOT / 'tools' / 'asr' / 'manifest.json'
+        warning_counts = {code: sum(code in item.get('asr_warnings', []) for item in segments)
+                          for code in ('asr_repetition', 'asr_long_segment', 'asr_timing_repaired')}
+        provenance['quality_review'] = {'rule_version': QUALITY_RULE_VERSION, 'warning_counts': warning_counts,
+                                        'flagged_segment_count': sum(bool(item.get('asr_warnings')) for item in segments),
+                                        'text_preserved': True, 'speaker_diarization': False,
+                                        'overlap_separation': False, 'human_listening_required': True}
+        provenance['timing_repairs'] = config.get('timing_repairs', [])
+        manifest = Path(config.get('manifest_path', ROOT / 'tools' / 'asr' / 'manifest.json'))
         if manifest.is_file():
             try:
-                installed = json.loads(manifest.read_text())
+                installed = json.loads(manifest.read_text(encoding='utf-8'))
                 provenance['installation'] = installed
             except (ValueError, OSError):
                 pass
@@ -216,7 +296,7 @@ def _finish(task: dict, media: dict, segments: list[dict], raw: bytes, result_js
                    'target_language': 'zh-Hans', 'language': language, 'glossary_version': 0,
                    'glossary': [], 'media': media,
                    'track': {'track_id': uid(), 'language': language, 'source_type': 'local_asr',
-                             'source_note': '本地 Whisper 自动识别底稿，尚未人工核验；混说、专名、静音与同步需复核。',
+                             'source_note': '本地 Whisper 自动识别底稿，尚未人工核验；不自动区分说话人或分离重叠人声，混说、重复、专名与同步需复核。',
                              'filename': 'transcription.srt', 'sha256': hashlib.sha256(raw).hexdigest(),
                              'media_id': media['media_id'], 'confidence': 'machine_unverified', 'asr': provenance},
                    'segments': segments, 'candidates': [], 'jobs': [], 'revisions': [],
@@ -275,19 +355,24 @@ def run_one(stopped: Callable[[], bool] = lambda: False) -> bool:
                     task_id, directory / 'ffmpeg.log', stopped)
         transition(task_id, stage='本地语音识别', progress=10)
         prefix = directory / 'transcription'
-        run_command([config['engine_path'], '-m', config['model_path'], '-f', str(wave),
+        engine_arguments = [config['engine_path'], '-m', config['model_path'], '-f', str(wave),
                      '-l', task['language'], '-ojf', '-osrt', '-of', str(prefix), '-pp',
-                     '-t', str(min(8, os.cpu_count() or 4))],
+                     '-t', str(min(8, os.cpu_count() or 4))]
+        if config.get('device') == 'cpu':
+            engine_arguments.append('-ng')
+        run_command(engine_arguments,
                     task_id, directory / 'asr.log', stopped, _engine_progress)
         transition(task_id, stage='创建审阅项目', progress=97)
         raw = prefix.with_suffix('.srt').read_bytes()
-        try:
-            segments = parse_subtitles(raw, 'transcription.srt')
-        except HTTPException as error:
-            raise RuntimeError('未取得有效字幕；可能没有可识别人声。请试听并尝试较短片段。') from error
-        result_json = json.loads(prefix.with_suffix('.json').read_text())
+        result_json = json.loads(prefix.with_suffix('.json').read_text(encoding='utf-8'))
         if not isinstance(result_json, dict):
             raise RuntimeError('本地识别结果格式无效，请检查引擎版本。')
+        try:
+            segments, timing_repairs = parse_engine_subtitles(raw, media.get('duration_ms'))
+        except HTTPException as error:
+            hint = '未生成字幕，可能没有可识别人声。' if error.detail == 'No subtitle cues found' else '请检查原始识别输出。'
+            raise RuntimeError(f'识别输出无法导入：{error.detail}。{hint}') from error
+        config = {**config, 'timing_repairs': timing_repairs}
         if stopped():
             raise Cancelled()
         _finish(task, media, segments, raw, result_json, config)
@@ -295,6 +380,9 @@ def run_one(stopped: Callable[[], bool] = lambda: False) -> bool:
         transition(task_id, status='cancelled', stage='已取消', error=None)
     except Exception as error:
         message = str(error) if isinstance(error, RuntimeError) else '本地转写失败，请检查媒体、磁盘空间与识别工具后重新选择文件。'
+        diagnostics = preserve_diagnostics(task_id, directory)
+        if diagnostics is not None:
+            message += f' 诊断输出保留在：{diagnostics}'
         transition(task_id, status='failed', stage='识别失败', error=message)
     finally:
         _cleanup(task)

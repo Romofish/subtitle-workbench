@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def main():
+    if os.name == 'nt':
+        sys.path.insert(0, str(ROOT / 'scripts'))
+        from windows_environment import configure_tools
+        configure_tools()
     actual_ytdlp = shutil.which("yt-dlp")
     assert actual_ytdlp and shutil.which("ffmpeg") and shutil.which("ffprobe")
     with tempfile.TemporaryDirectory(prefix="subtitle-real-integration-") as scratch:
@@ -30,9 +35,9 @@ def main():
         ], check=True)
         shim = base / "bin"
         shim.mkdir()
-        wrapper = shim / "yt-dlp"
+        wrapper = shim / "yt_dlp_fixture.py"
         wrapper.write_text("""#!/usr/bin/env python3
-import os, sys
+import os, sys, subprocess
 args = sys.argv[1:]
 if '--version' not in args:
     if '--load-info-json' in args:
@@ -40,9 +45,8 @@ if '--version' not in args:
     else:
         assert args[-2] == '--', args
         args = ['--ignore-config', '--enable-file-urls', '--load-info-json', os.environ['FIXTURE_JSON']] + args[:-2]
-os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
-""")
-        wrapper.chmod(0o755)
+sys.exit(subprocess.run([os.environ['REAL_YTDLP']] + args).returncode)
+""", encoding="utf-8")
         fixture = base / "fixture.json"
         output = base / "output"
         output.mkdir()
@@ -63,24 +67,29 @@ os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
             },
         }
         def run(simulate="no", allow_translated="no", languages="th.*,zh.*,en.*", expected_status=0):
-            fixture.write_text(json.dumps(info, ensure_ascii=False))
+            fixture.write_text(json.dumps(info, ensure_ascii=False), encoding="utf-8")
             env = dict(os.environ, YOUTUBE_DOWNLOAD_DIR=str(output), PROXY_URL="",
-                       REAL_YTDLP=actual_ytdlp, FIXTURE_JSON=str(fixture), TEST_SHIM=str(shim),
+                       REAL_YTDLP=actual_ytdlp, FIXTURE_JSON=str(fixture),
+                       PYTHONUTF8="1", PYTHONIOENCODING="utf-8",
                        ALLOW_TRANSLATED_SUBS=allow_translated, SUB_LANGS=languages,
                        NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost")
-            result = subprocess.run([
-                "/bin/bash", "-c",
-                'source "$1"; export PATH="$TEST_SHIM:$PATH"; JS_ARGS=(); YTDLP_VERSION=$(yt-dlp --version); '
-                'download_video "https://www.youtube.com/watch?v=offline001" yes "$2"',
-                "integration", str(ROOT / "youtube_download.command"), simulate,
-            ], env=env, cwd=base, text=True, capture_output=True)
+            driver = """import sys
+sys.path.insert(0, sys.argv[1])
+import downloader
+settings = downloader.DownloadSettings.from_environment()
+tools = downloader.DownloadTools([sys.executable, '-X', 'utf8', sys.argv[2]], ['ffprobe'], [], 'offline-integration')
+sys.exit(downloader.download_video('https://www.youtube.com/watch?v=offline001', 'yes', sys.argv[3] == 'yes', settings=settings, tools=tools))
+"""
+            result = subprocess.run([sys.executable, '-X', 'utf8', '-c', driver,
+                                     str(ROOT / 'scripts'), str(wrapper), simulate],
+                                    env=env, cwd=base, text=True, encoding='utf-8', capture_output=True)
             assert result.returncode == expected_status, result.stdout + result.stderr
             return result
 
         first = run()
         records = list(output.rglob("*.sources.json"))
         assert len(records) == 1, first.stdout + first.stderr + repr(list(output.rglob("*")))
-        record = json.loads(records[0].read_text())
+        record = json.loads(records[0].read_text(encoding='utf-8'))
         final_path = Path(record["media"]["path"])
         assert final_path.name == info["title"] + " [offline001].mp4", final_path
         assert final_path.parent == output / (info["title"] + " [offline001]"), final_path
@@ -96,32 +105,32 @@ os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
         assert saved["th"]["source"]["category"] == "platform_subtitles"
         assert saved["th"]["source"]["same_language_regular_preferred"] is True
         assert saved["th-orig"]["source"]["category"] == "platform_automatic_asr"
-        assert "English despite" in Path(saved["th"]["path"]).read_text()
-        assert "สวัสดี" in Path(saved["th-orig"]["path"]).read_text()
+        assert "English despite" in Path(saved["th"]["path"]).read_text(encoding='utf-8')
+        assert "สวัสดี" in Path(saved["th-orig"]["path"]).read_text(encoding='utf-8')
         assert all(not row["source"]["original_audio_language_verified"] for row in saved.values())
         assert saved["en"]["source"]["category"] == "platform_automatic_asr"
         assert "zh-Hans" not in saved
         assert all(Path(row["path"]).is_file() and Path(row["path"]).parent == final_path.parent for row in saved.values())
-        assert "tracking=remove-me" not in records[0].read_text()
-        assert "timedtext" not in records[0].read_text()
+        assert "tracking=remove-me" not in records[0].read_text(encoding='utf-8')
+        assert "timedtext" not in records[0].read_text(encoding='utf-8')
         print("PASS real yt-dlp media-first conversion, default translation exclusion, Thai provenance and final paths")
 
         # Changing an old sidecar must not make it the source for a new run.
         old_thai = Path(saved["th"]["path"])
-        old_thai.write_text("人工修改稿，不得覆盖\n")
+        old_thai.write_text("人工修改稿，不得覆盖\n", encoding="utf-8")
         repeated = run()
-        again = json.loads(records[0].read_text())
+        again = json.loads(records[0].read_text(encoding='utf-8'))
         new_thai = next(row for row in again["subtitles"]["files"] if row["language"] == "th")
-        assert old_thai.read_text() == "人工修改稿，不得覆盖\n"
+        assert old_thai.read_text(encoding='utf-8') == "人工修改稿，不得覆盖\n"
         assert Path(new_thai["path"]) != old_thai
-        assert "English despite" in Path(new_thai["path"]).read_text()
+        assert "English despite" in Path(new_thai["path"]).read_text(encoding='utf-8')
         assert again["media"]["path"] == str(final_path)
         assert "already been downloaded" in repeated.stdout, repeated.stdout
         assert len(list(output.rglob("*.mp4"))) == 1, list(output.rglob("*.mp4"))
         print("PASS repeated download reuses stable media and preserves previous subtitle edits")
 
         run(allow_translated="yes")
-        widened = json.loads(records[0].read_text())
+        widened = json.loads(records[0].read_text(encoding='utf-8'))
         assert widened["subtitles"]["allow_translated_subs"] is True
         assert widened["subtitles"]["saved_srt_count"] == 4
         assert next(row for row in widened["subtitles"]["files"] if row["language"] == "zh-Hans")["source"]["category"] == "platform_automatic_translation"
@@ -138,8 +147,8 @@ os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
         info["subtitles"] = {}
         info["automatic_captions"] = {}
         run()
-        no_subs = next(json.loads(p.read_text()) for p in output.rglob("*.sources.json")
-                       if json.loads(p.read_text())["source"]["id"] == "offline002")
+        no_subs = next(json.loads(p.read_text(encoding='utf-8')) for p in output.rglob("*.sources.json")
+                       if json.loads(p.read_text(encoding='utf-8'))["source"]["id"] == "offline002")
         assert Path(no_subs["media"]["path"]).parent != final_path.parent
         assert no_subs["subtitles"]["status"] == "no_matching_subtitles"
         assert no_subs["subtitles"]["files"] == []
@@ -157,8 +166,8 @@ os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
             {"url": audio.as_uri(), "format_id": "audio", "ext": "m4a", "vcodec": "none", "acodec": "aac"},
         ], subtitles={"th": [subtitle("สวัสดี", "lang=th")]})
         run()
-        merged = next(json.loads(p.read_text()) for p in output.rglob("*.sources.json")
-                      if json.loads(p.read_text())["source"]["id"] == "offline003")
+        merged = next(json.loads(p.read_text(encoding='utf-8')) for p in output.rglob("*.sources.json")
+                      if json.loads(p.read_text(encoding='utf-8'))["source"]["id"] == "offline003")
         assert Path(merged["media"]["path"]).name == info["title"] + " [offline003].mkv", merged
         assert [len(merged["media"]["tracks"][kind]) for kind in ("video", "audio", "subtitle")] == [1, 1, 0], merged
         assert merged["subtitles"]["saved_srt_count"] == 1
@@ -185,9 +194,9 @@ os.execv(os.environ['REAL_YTDLP'], [os.environ['REAL_YTDLP']] + args)
         try:
             info.update(id='offline429', subtitles={language: [{'ext': 'vtt', 'url': f'http://127.0.0.1:{server.server_port}/{route}.vtt?lang={language}'}] for language, route in [('th', 'th'), ('en', 'en'), ('zh-Hans', 'zh')]}, automatic_captions={})
             failed_caption = run(languages='th,en,zh-Hans')
-            partial = next(json.loads(p.read_text()) for p in output.rglob('*.sources.json') if json.loads(p.read_text())['source']['id'] == 'offline429')
+            partial = next(json.loads(p.read_text(encoding='utf-8')) for p in output.rglob('*.sources.json') if json.loads(p.read_text(encoding='utf-8'))['source']['id'] == 'offline429')
             assert partial['download']['status'] == 'completed'
-            assert partial['subtitles']['status'] == 'partial'
+            assert partial['subtitles']['status'] == 'partial', (partial, failed_caption.stdout, failed_caption.stderr)
             assert partial['subtitles']['rate_limited'] is True
             assert partial['subtitles']['attempted_count'] == 2
             assert partial['subtitles']['saved_srt_count'] == 1

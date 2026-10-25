@@ -1,5 +1,6 @@
 export type Segment = {
   segment_id: string; start_ms: number; end_ms: number; source_text: string; zh_text: string;
+  speaker: string; overlap: boolean; unclear: boolean; asr_warnings?: string[];
   revision: number; source_revision: number; review_status: 'unreviewed' | 'needs_review' | 'reviewed';
   translation_stale: boolean; manual_zh: boolean; deleted: boolean; parent_ids: string[]; risk_flags: string[];
 };
@@ -11,7 +12,7 @@ export type Project = {
   segments: Segment[]; candidates: any[]; jobs: any[]; revisions: any[]; reference_tracks: any[];
 };
 export type ProjectSummary = { project_id: string; name: string; document_revision: number; segment_count: number; reviewed_count: number; updated_at: string; media: Media | null };
-export type Draft = Pick<Segment, 'source_text' | 'zh_text' | 'review_status'> & {start: string; end: string};
+export type Draft = Pick<Segment, 'source_text' | 'zh_text' | 'review_status' | 'speaker' | 'overlap' | 'unclear'> & {start: string; end: string};
 
 export type TranscriptionStatus = {
   ready: boolean;

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import re
 from fastapi import HTTPException
-from .store import uid
+from .store import ANNOTATION_DEFAULTS, uid
 
 TIMING = re.compile(r'^\s*((?:\d+:)?\d{2}:\d{2}[.,]\d{3})\s*-->\s*((?:\d+:)?\d{2}:\d{2}[.,]\d{3})(?:\s+.*)?$')
 
@@ -57,7 +57,7 @@ def parse_subtitles(raw: bytes, filename: str) -> list[dict]:
 
 
 def new_segment(start: int, end: int, source: str, zh: str = '', parents: list[str] | None = None) -> dict:
-    return {'segment_id': uid(), 'start_ms': start, 'end_ms': end, 'source_text': source, 'zh_text': zh, 'revision': 1, 'source_revision': 1, 'review_status': 'unreviewed', 'translation_stale': False, 'timing_changed': False, 'manual_zh': bool(zh), 'deleted': False, 'parent_ids': parents or [], 'risk_flags': []}
+    return {'segment_id': uid(), 'start_ms': start, 'end_ms': end, 'source_text': source, 'zh_text': zh, 'revision': 1, 'source_revision': 1, 'review_status': 'unreviewed', 'translation_stale': False, 'timing_changed': False, 'manual_zh': bool(zh), 'deleted': False, 'parent_ids': parents or [], 'risk_flags': [], **ANNOTATION_DEFAULTS}
 
 
 def live_segments(project: dict) -> list[dict]:
@@ -78,14 +78,23 @@ def refresh_risks(project: dict) -> None:
             flags.append('out_of_bounds')
         if index and maximum_prior_end > item['start_ms']:
             flags.append('overlap')
+        if item.get('overlap', False):
+            flags.append('speaker_overlap')
         if max((len(line) for line in (target or source).splitlines()), default=0) > 48:
             flags.append('long_text')
         if re.search(r'\d', source):
             flags.append('numbers')
         if re.search(r'\b[A-Z][a-z]+(?: [A-Z][a-z]+)+\b', source):
             flags.append('proper_name')
-        if re.search(r'(?i)\b(?:inaudible|unclear|unintelligible)\b|听不清|ไม่ชัด|\?\?\?', source):
+        if item.get('unclear', False) or re.search(r'(?i)\b(?:inaudible|unclear|unintelligible)\b|听不清|ไม่ชัด|\?\?\?', source):
             flags.append('unclear')
+        if 'asr_warnings' in item:
+            # Retain original ASR warnings as provenance, but evaluate the current
+            # human-edited text and timing so resolved issues do not remain flagged.
+            from .asr_quality import asr_quality_warnings
+            flags.extend(asr_quality_warnings(source, item['end_ms'] - item['start_ms']))
+            if 'asr_timing_repaired' in item['asr_warnings'] and not item.get('asr_timing_reviewed', False):
+                flags.append('asr_timing_repaired')
         if not target.strip():
             flags.append('missing_translation')
         if item.get('translation_stale'):
@@ -105,7 +114,7 @@ def timestamp(value: int, format: str) -> str:
     return f'{h:02}:{m:02}:{s:02}{"," if format == "srt" else "."}{ms:03}'
 
 
-def serialize(project: dict, format: str, mode: str) -> tuple[bytes, list[dict]]:
+def serialize(project: dict, format: str, mode: str, include_speakers: bool = False) -> tuple[bytes, list[dict]]:
     if format not in ('srt', 'vtt') or mode not in ('source', 'zh', 'bilingual'):
         raise HTTPException(422, 'format must be srt/vtt; mode must be source/zh/bilingual')
     blocks = []
@@ -113,7 +122,8 @@ def serialize(project: dict, format: str, mode: str) -> tuple[bytes, list[dict]]
     for item in live_segments(project):
         if item['start_ms'] < 0 or item['end_ms'] <= item['start_ms']:
             raise HTTPException(422, f'Invalid timing on subtitle {item["segment_id"]}')
-        text = item['source_text'] if mode == 'source' else item['zh_text'] if mode == 'zh' else '\n'.join(x for x in (item['source_text'], item['zh_text']) if x.strip())
+        selected = [item['source_text']] if mode == 'source' else [item['zh_text']] if mode == 'zh' else [item['source_text'], item['zh_text']]
+        text = '\n'.join(x for x in selected if x.strip())
         # Blank lines delimit cues in both formats. Normalize them explicitly and
         # record the change in the identity manifest rather than emit malformed files.
         original_text = text
@@ -123,6 +133,10 @@ def serialize(project: dict, format: str, mode: str) -> tuple[bytes, list[dict]]
         if not text.strip():
             mapping.append({'segment_id': item['segment_id'], 'revision': item['revision'], 'cue_number': None, 'omitted': 'empty_translation'})
             continue
+        speaker = item.get('speaker', '').strip()
+        if include_speakers and speaker:
+            text = '\n'.join(f'[{speaker}] ' + '\n'.join(line for line in block.splitlines() if line.strip())
+                             for block in selected if block.strip())
         n = len(blocks) + 1
         blocks.append(f'{n}\n{timestamp(item["start_ms"], format)} --> {timestamp(item["end_ms"], format)}\n{text}')
         mapping.append({'cue_number': n, 'segment_id': item['segment_id'], 'revision': item['revision'], 'start_ms': item['start_ms'], 'end_ms': item['end_ms'], 'text_sha256': hashlib.sha256(text.encode()).hexdigest(), 'normalizations': normalizations})

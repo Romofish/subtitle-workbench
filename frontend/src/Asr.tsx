@@ -121,6 +121,7 @@ export function TranscriptionForm({controller, onSubmitted}: {controller: Contro
       </div>
     </fieldset>
     <p className="fine-print">泰英混说可选自动检测，识别结果需试听复核。</p>
+    <p className="fine-print">多人同时讲话可能漏识别或串词。当前不会自动分离交叠语音，也不会自动识别说话人；可在审阅时手动填写说话人，并标记交叠发言、听不清。</p>
     <div className="asr-submit-row"><span>按顺序识别，可继续审阅其他项目。</span><button className="primary" disabled={uploading || loading || !status?.ready} type="submit">{uploading ? <span className="spinner small"/> : <Icon name="sound" size={16}/>} {uploading ? '正在上传至本机…' : '开始本地识别'}</button></div>
   </form>;
 }

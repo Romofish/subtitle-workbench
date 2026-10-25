@@ -1,6 +1,6 @@
 # 下载脚本与字幕来源记录
 
-更新：2026-10-23。适用于 [youtube_download.command](../youtube_download.command)。媒体下载与可选字幕下载现已分开；本地工作台及无字幕转写入口见 [运行说明](../README.md)。
+更新：2026-10-25。本文仍有效，服务于 [SE 主流程实施计划](se-workflow-plan.md)。Windows 与 Mac 共用 [scripts/downloader.py](../scripts/downloader.py)，入口为 [youtube_download.cmd](../youtube_download.cmd) / [youtube_download.command](../youtube_download.command)。Studio 已停止开发，下载器继续保留。
 
 ## 429 故障与处理依据
 
@@ -16,13 +16,19 @@
 2. 随后逐轨下载独立字幕并转换 SRT，每条都有独立完成证据。某条失败不会撤销已完成媒体与字幕。
 3. 遇到 429 立即停止本轮剩余字幕请求，记录未尝试轨；不连续高频重试。
 4. 默认跳过有 `tlang` 证据的自动翻译和未经确认的自动轨。平台普通字幕和资源不同的 `-orig` ASR 轨都保留；只按同一字幕资源去重，不能因为语言代码相似就丢掉另一来源。
-5. 字幕只作为独立 SRT 保存，本次不再新增内嵌轨；已有媒体的内嵌轨仍由 ffprobe 如实记录。工作台可直接导入独立文件。
+5. 字幕只作为独立 SRT 保存，本次不再新增内嵌轨；已有媒体的内嵌轨仍由 ffprobe 如实记录。SE 可直接打开独立字幕。
 
 “平台普通字幕”不保证人工制作、官方、准确或原语。语言代码也不证明实际内容语言，需要听音与文本核对。
 
 ## 使用方式
 
-需要 yt-dlp、FFmpeg / ffprobe、Python 3；建议安装 Deno 供 YouTube 解析使用。已有 Homebrew 时可运行 `brew install yt-dlp ffmpeg python deno`。本脚本独立运行，不依赖工作台的 Python 虚拟环境或前端。
+需要 yt-dlp、FFmpeg / ffprobe、Python 3.10+；建议安装 Deno 供 YouTube 解析使用。已有组件优先复用。共享下载核心只用 Python 标准库，不需要 Studio 服务、FastAPI、前端或 Node。
+
+**入口已独立化**：Windows 的 `youtube_download.cmd` 直接调用 `youtube_download.ps1`，使用兼容全局 Python；旧 `workbench.ps1 download` / `workbench.cmd download` 提前转发至此入口。Mac 入口查找 Homebrew 或系统的兼容 `python3`。两平台均不再自动选择项目 `.venv`，也不读取 Studio `.env`；不会安装或启动 Studio。
+
+需要指定解释器时设置 `DOWNLOADER_PYTHON` 为其完整路径；兼容原先显式设置的 `WORKBENCH_PYTHON`，但新变量优先。显式路径不可用会报错，不默默换解释器。未显式指定时跳过激活的虚拟环境，复用兼容全局安装。此变更不删除已有环境或工具。
+
+Mac 在仓库根目录执行（缺少工具且已有 Homebrew 时可按需安装 `yt-dlp ffmpeg python deno`）：
 
 ```bash
 ./youtube_download.command --check
@@ -30,7 +36,20 @@
 ./youtube_download.command 'https://www.youtube.com/watch?v=VIDEO_ID'
 ```
 
-默认保存到 `~/Downloads/YouTube/视频标题 [视频ID]/`，每个视频独立文件夹，语言筛选仍为 `th.*,zh.*,en.*`，但默认在元数据层排除自动翻译。`--simulate` 只解析，不创建媒体、字幕或来源记录，不表示真实下载已通过。
+Windows 当前入口：
+
+```powershell
+.\youtube_download.cmd --check
+.\youtube_download.ps1 'https://www.youtube.com/watch?v=VIDEO_ID&t=657s'
+```
+
+PowerShell 中含 `&` 的链接推荐使用 `youtube_download.ps1` 并保留引号；`workbench.ps1 download` 仍兼容。双击 `.cmd` 后粘贴链接也可。带 `t=` 的网址仍下载整片，不自动截取片段。
+
+若直接使用全局 Python 执行核心，可运行 `python3 -X utf8 scripts/downloader.py --check`（Windows 替换为实际全局 Python 路径）。Windows 核心自行复用 PATH、`WORKBENCH_TOOLS_DIR` 或 `%LOCALAPPDATA%\Programs\SubtitleWorkbench` 下的已装工具；不再依赖 Studio dispatcher 先配置 PATH。Mac 下载工具须在 PATH 中，入口补充 Homebrew 常用目录。
+
+缺依赖时仅处理缺失工具，不再提示运行 `setup.cmd`。Windows 可选安装器需要全局 Python **3.11+**：执行 `scripts/install_windows_tools.py --only core`，但先检查并复用已有软件；日常下载本身支持 Python 3.10+，不会自动调用安装器。自定义工具目录使用显式环境变量 `WORKBENCH_TOOLS_DIR`，不从旧 Studio `.env` 读取。
+
+默认输出：Mac 为 `~/Downloads/YouTube/视频标题 [视频ID]/`；Windows 使用系统 Downloads 已知文件夹（支持重定向），其下建立 `YouTube/视频标题 [视频ID]/`。每个视频独立文件夹，语言筛选仍为 `th.*,zh.*,en.*`，但默认在元数据层排除自动翻译。`--simulate` 只解析，不创建媒体、字幕或来源记录，不表示真实下载已通过。
 
 ```bash
 # 只考虑泰语，仍保留平台普通字幕与不同资源的原语 ASR
@@ -42,7 +61,7 @@ YOUTUBE_DOWNLOAD_DIR='/绝对路径/下载目录' ./youtube_download.command '�
 PROXY_URL='http://127.0.0.1:7897' ./youtube_download.command '视频链接'
 ```
 
-默认不显式指定代理；环境与 yt-dlp 配置仍可能影响网络。需要代理时通过 `PROXY_URL` 指定自己的地址，上例端口仅为示例。脚本不会读取浏览器 Cookie 或修改系统代理。
+默认不显式指定代理；环境与 yt-dlp 配置仍可能影响网络。需要代理时通过 `PROXY_URL` 指定自己的地址，上例端口仅为示例。脚本不主动添加读取浏览器 Cookie 的参数，但用户已有 yt-dlp 配置仍可能生效；脚本不修改系统代理。
 
 ## 文件和完成语义
 
@@ -77,13 +96,26 @@ YouTube/
 
 ## 验证
 
-Bash 语法、依赖检查、来源/部分失败单测与真实 yt-dlp + FFmpeg 离线集成已执行。真实工具集成包含本地 HTTP 429 场景：媒体先完成、首条字幕保留、失败请求不重复、之后的轨未请求。新脚本未重复请求 YouTube 验证平台是否解除限制。
+历史 Mac 验证包含 Bash 语法、依赖检查、来源/部分失败单测与真实 yt-dlp + FFmpeg 离线集成；当时没有重复请求 YouTube 验证限流是否解除。真实工具集成包含本地 HTTP 429 场景：媒体先完成、首条字幕保留、失败请求不重复、之后的轨未请求。
+
+2026-10-25 既有 Windows 验证中，17 项下载器单测及 7 个真实工具离线场景通过；用户指定的 `7WbgUplUHWE` 完整视频、英文参考字幕和来源记录已取得。这个具体请求成功不保证其他视频或未来请求不会限流，也不代表 SE 转写、翻译、语言或成片质量通过。
+
+P1 独立化后的入口验证使用临时最小文件集合，不放置 backend/frontend/Studio dispatcher。契约测试另外放置不可执行的 `.venv` 解释器，验证它不会被自动选中。检查带 `&` 的完整 URL、中泰字符与空格路径、明确退出码；真实工具集成只访问本地 HTTP 测试素材，不重复下载原片。Mac 包装在 Windows Git Bash 的语法/契约结果不能当作 Mac 实机验收；Mac 本机 P1 仍待执行。实际执行结果见[实施计划](se-workflow-plan.md#9-执行记录)。
 
 ```bash
 python3 -m unittest discover -s tests -p 'test_downloader_manifest.py' -v
+python3 -m unittest discover -s tests -p 'test_downloader_entrypoints.py' -v
 python3 tests/integration_downloader.py
+# Windows 使用实际全局 Python；此项调用真实 PowerShell / cmd 入口
+python tests/integration_downloader_entrypoints.py
 ```
 
-历史桌面脚本备份保留在验证环境，不随仓库发布。独立 SRT 的格式转换不等于通过工作台语义与时间校验；例如平台滚动 ASR 可能含空白 cue、重复文本或逐词标记，仍需清理和复核。
+历史桌面脚本备份保留在验证环境，不随仓库发布。独立 SRT 的格式转换不等于语义与时间正确；例如平台滚动 ASR 可能含空白 cue、重复文本或逐词标记，仍须在 SE 听音复核。
+
+## 同步与保留范围
+
+Mac 最小运行集合为 `youtube_download.command` 与 `scripts/downloader.py`；Windows 最小运行集合为 `youtube_download.cmd`、`youtube_download.ps1`、`scripts/downloader.py`、`scripts/windows_environment.py`，保持目录结构。兼容旧 workbench 命令时另带 `workbench.cmd` / `workbench.ps1`；独立入口不需要 `scripts/windows_entry.py`。共享核心、对应测试和 `.gitattributes` 一并交接；不能只同步已跟踪文件而漏掉新文件。
+
+源码同步不复制 `.venv`、工具二进制、模型、Cookie、`.env` 或下载成果；详见 [主计划的跨平台要求](se-workflow-plan.md#cross-platform-sync)。
 
 实现依据：[yt-dlp 字幕选项](https://github.com/yt-dlp/yt-dlp#subtitle-options)、[ffprobe](https://ffmpeg.org/ffprobe.html)。

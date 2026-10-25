@@ -17,12 +17,12 @@ from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr, field_validator, model_validator
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from . import media as media_utils
 from . import asr
-from .store import Conflict, check_revision, consistent_backup, create_project, data_dir, list_projects, mutate_project, now, read_project, segment, uid
+from .store import ANNOTATION_DEFAULTS, Conflict, check_revision, consistent_backup, create_project, data_dir, list_projects, mutate_project, now, read_project, segment, uid
 from .subtitles import live_segments, new_segment, parse_subtitles, refresh_risks, serialize
 
 @asynccontextmanager
@@ -63,6 +63,11 @@ async def local_origin_only(request: Request, call_next):
 SourceType = Literal['platform_regular', 'platform_auto', 'auto_translation', 'external_asr', 'local_asr', 'human_import', 'unknown']
 
 
+def valid_speaker(value: str) -> bool:
+    return isinstance(value, str) and len(value) <= 100 and not any(
+        ord(character) < 32 or character in '\x7f\x85\u2028\u2029' for character in value)
+
+
 class PatchSegment(BaseModel):
     model_config = ConfigDict(extra='forbid')
     base_revision: int = Field(ge=1)
@@ -71,6 +76,16 @@ class PatchSegment(BaseModel):
     start_ms: int | None = Field(default=None, ge=0)
     end_ms: int | None = Field(default=None, ge=1)
     review_status: Literal['unreviewed', 'needs_review', 'reviewed'] | None = None
+    speaker: StrictStr | None = Field(default=None, max_length=100)
+    overlap: StrictBool | None = None
+    unclear: StrictBool | None = None
+
+    @field_validator('speaker')
+    @classmethod
+    def single_line_speaker(cls, value):
+        if value is not None and not valid_speaker(value):
+            raise ValueError('Speaker must be a single-line label without control characters')
+        return value
 
 
 class Part(BaseModel):
@@ -238,6 +253,8 @@ def patch_segment(pid: str, sid: str, body: PatchSegment):
             raise HTTPException(422, 'Source text cannot be empty')
         source_changed = 'source_text' in values and values['source_text'] != item['source_text']
         time_changed = start != item['start_ms'] or end != item['end_ms']
+        annotation_changed = any(name in values and values[name] != item.get(name, default)
+                                 for name, default in ANNOTATION_DEFAULTS.items())
         item.update(values)
         if 'zh_text' in values:
             invalidate_candidates(project)
@@ -261,7 +278,12 @@ def patch_segment(pid: str, sid: str, body: PatchSegment):
             item['timing_changed'] = True
             item['review_status'] = 'needs_review'
             invalidate_candidates(project, {sid})
-        if body.review_status == 'reviewed' and not (source_changed or time_changed):
+        if annotation_changed:
+            item['review_status'] = 'needs_review'
+            invalidate_candidates(project, {sid})
+        if 'asr_timing_repaired' in item.get('asr_warnings', []) and (time_changed or body.review_status == 'reviewed'):
+            item['asr_timing_reviewed'] = True
+        if body.review_status == 'reviewed' and not (source_changed or time_changed or annotation_changed):
             item['translation_stale'] = False
             item['timing_changed'] = False
             item['context_changed'] = False
@@ -285,6 +307,13 @@ def split_segment(pid: str, body: Split):
         parent['deleted'] = True
         parent['revision'] += 1
         children = [new_segment(p.start_ms, p.end_ms, p.source_text, p.zh_text, [parent['segment_id']]) for p in parts]
+        for item in children:
+            item.update({name: parent.get(name, default) for name, default in ANNOTATION_DEFAULTS.items()})
+            if 'asr_warnings' in parent:
+                item['asr_warnings'] = list(parent['asr_warnings'])
+            if 'asr_timing_reviewed' in parent:
+                item['asr_timing_reviewed'] = parent['asr_timing_reviewed']
+            item['review_status'] = 'needs_review'
         project['segments'].extend(children)
         invalidate_candidates(project)
         refresh_risks(project)
@@ -309,6 +338,17 @@ def merge_segments(pid: str, body: Merge):
         if positions != list(range(positions[0], positions[-1] + 1)):
             raise HTTPException(422, 'Only consecutive subtitles can be merged')
         merged = new_segment(min(s['start_ms'] for s in items), max(s['end_ms'] for s in items), body.source_text, body.zh_text, [ordered_ids[i] for i in positions])
+        speakers = {item.get('speaker', '') for item in items}
+        # Never guess which identity describes a merged multi-speaker interval.
+        merged['speaker'] = speakers.pop() if len(speakers) == 1 else ''
+        merged['overlap'] = any(item.get('overlap', False) for item in items)
+        merged['unclear'] = any(item.get('unclear', False) for item in items)
+        merged['review_status'] = 'needs_review'
+        if any('asr_warnings' in item for item in items):
+            merged['asr_warnings'] = sorted({warning for item in items for warning in item.get('asr_warnings', [])})
+            if 'asr_timing_repaired' in merged['asr_warnings']:
+                merged['asr_timing_reviewed'] = all(item.get('asr_timing_reviewed', False) for item in items
+                                                   if 'asr_timing_repaired' in item.get('asr_warnings', []))
         for item in items:
             item['deleted'] = True
             item['revision'] += 1
@@ -431,12 +471,13 @@ async def relink(pid: str, media: UploadFile = File(...)):
 
 
 @app.get('/api/projects/{pid}/export')
-def export_project(pid: str, format: str = 'srt', mode: str = 'bilingual', bundle: bool = False):
+def export_project(pid: str, format: str = 'srt', mode: str = 'bilingual', bundle: bool = False, include_speakers: bool = False):
     project = read_project(pid)  # Detached snapshot: edits after this point cannot alter the export.
-    content, mapping = serialize(project, format, mode)
+    content, mapping = serialize(project, format, mode, include_speakers=include_speakers)
     export_id = uid()
     filename = f'subtitles-{mode}.{format}'
     manifest = {'schema_version': 1, 'export_id': export_id, 'project_id': pid, 'document_revision': project['document_revision'], 'created_at': now(), 'media_sha256': (project.get('media') or {}).get('sha256'), 'mode': mode, 'format': format, 'draft': any(s['review_status'] != 'reviewed' for s in live_segments(project)), 'filename': filename, 'sha256': hashlib.sha256(content).hexdigest(), 'segments': mapping, 'track': project['track']}
+    manifest['include_speakers'] = include_speakers
     mutate_project(pid, 'system', 'export_snapshot', lambda p: p['exports'].append(manifest), undoable=False)
     if bundle:
         buffer = io.BytesIO()
@@ -481,6 +522,20 @@ def backup_project(pid: str):
     return attachment(buffer.getvalue(), f'project-{pid[:8]}.zip', 'application/zip')
 
 
+def validate_segment_annotations(item: dict):
+    if 'speaker' in item and not valid_speaker(item['speaker']):
+        raise HTTPException(422, 'Invalid speaker label: expected a single-line string of at most 100 characters')
+    for name in ('overlap', 'unclear', 'asr_timing_reviewed'):
+        if name in item and type(item[name]) is not bool:
+            raise HTTPException(422, f'Invalid {name}: expected a boolean')
+    if 'asr_warnings' in item:
+        warnings = item['asr_warnings']
+        allowed = {'asr_repetition', 'asr_long_segment', 'asr_timing_repaired'}
+        if (not isinstance(warnings, list) or
+                any(not isinstance(warning, str) or warning not in allowed for warning in warnings)):
+            raise HTTPException(422, 'Invalid ASR warnings')
+
+
 def validate_restore(project: dict):
     if not isinstance(project, dict) or project.get('schema_version') != 1:
         raise HTTPException(422, 'Unsupported project schema')
@@ -522,6 +577,14 @@ def validate_restore(project: dict):
                 state = change[key]
                 if state is not None and (not isinstance(state, dict) or not isinstance(state.get('revision'), int) or not isinstance(state.get('source_revision'), int) or not isinstance(state.get('source_text'), str)):
                     raise HTTPException(422, 'Invalid revision snapshot')
+                if state is not None:
+                    validate_segment_annotations(state)
+    for track in project.get('reference_tracks', []):
+        if 'segments' in track:
+            if not isinstance(track['segments'], list) or any(not isinstance(item, dict) for item in track['segments']):
+                raise HTTPException(422, 'Invalid reference-track subtitles')
+            for item in track['segments']:
+                validate_segment_annotations(item)
     media = project.get('media')
     if media is not None:
         if not isinstance(media, dict) or not isinstance(media.get('sha256'), str) or len(media['sha256']) != 64 or any(c not in '0123456789abcdef' for c in media['sha256']):
@@ -538,6 +601,7 @@ def validate_restore(project: dict):
     for item in project['segments']:
         if not isinstance(item, dict):
             raise HTTPException(422, 'Invalid project segment')
+        validate_segment_annotations(item)
         try:
             sid = item['segment_id']
             if sid in seen or not isinstance(sid, str):

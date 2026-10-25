@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -11,13 +12,14 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 from app import asr
+from app.asr_quality import asr_quality_warnings
 from app.store import list_projects, read_project, data_dir
 
 
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
     monkeypatch.setenv('SUBTITLE_DATA_DIR', str(tmp_path / 'data'))
-    engine = tmp_path / 'whisper-cli'
+    engine = tmp_path / 'whisper-cli.py'
     engine.write_text('''#!/usr/bin/env python3
 import json, pathlib, sys
 args = sys.argv[1:]
@@ -25,10 +27,16 @@ prefix = pathlib.Path(args[args.index('-of') + 1])
 assert '-tr' not in args and '--translate' not in args
 assert args[args.index('-l') + 1] in ('auto', 'th', 'en')
 prefix.with_suffix('.srt').write_text('1\\n00:00:00,100 --> 00:00:00,900\\nสวัสดี Hello\\n\\n', encoding='utf-8')
-prefix.with_suffix('.json').write_text(json.dumps({'result': {'language': 'th'}, 'transcription': []}))
+prefix.with_suffix('.json').write_text(json.dumps({'result': {'language': 'th'}, 'transcription': [{'text': 'สวัสดี 中文'}]}, ensure_ascii=False), encoding='utf-8')
 print('whisper_print_progress_callback: progress = 100%', file=sys.stderr)
-''')
-    engine.chmod(0o755)
+''', encoding='utf-8')
+    # Exercise a real process on both platforms without relying on Unix shebang execution.
+    original_popen = subprocess.Popen
+    def popen(arguments, *args, **kwargs):
+        if arguments[0] == str(engine):
+            arguments = [sys.executable, *arguments]
+        return original_popen(arguments, *args, **kwargs)
+    monkeypatch.setattr(subprocess, 'Popen', popen)
     config = {'ready': True, 'engine': 'whisper.cpp', 'model': 'test-mock-only', 'model_label': 'Test',
               'reasons': [], 'local': True, 'engine_path': str(engine), 'model_path': str(tmp_path / 'mock.bin')}
     monkeypatch.setattr(asr, 'configuration', lambda: config)
@@ -167,6 +175,116 @@ def test_progress_is_engine_based_and_bounded():
     assert asr._engine_progress('unrelated text') is None
 
 
+def test_quality_hints_preserve_repetition_and_do_not_guess_speakers():
+    text = 'นี่' * 109
+    assert asr_quality_warnings(text, 30000) == ['asr_repetition', 'asr_long_segment']
+    assert asr_quality_warnings('No, no, no!', 2000) == []
+    assert asr_quality_warnings('สวัสดี Hello 中文', 12000) == ['asr_long_segment']
+    segments, repairs = asr.parse_engine_subtitles(
+        f'1\n00:00:00,000 --> 00:00:30,000\n{text}\n'.encode('utf-8'), 60000)
+    assert segments[0]['source_text'] == text and repairs == []
+    assert segments[0]['asr_warnings'] == ['asr_repetition', 'asr_long_segment']
+    assert not segments[0].get('speaker') and not segments[0].get('overlap')
+
+
+def test_zero_duration_engine_cues_keep_every_word_and_original_times():
+    raw = ('1\n00:00:00,000 --> 00:00:00,000\nสวัสดี\n\n\n\n'
+           '2\n00:00:00,500 --> 00:00:00,500\nHello\n\n'
+           '3\n00:00:00,500 --> 00:00:00,500\n另一个声音\n\n'
+           '4\n00:00:01,000 --> 00:00:01,000\n结束\n').encode('utf-8')
+    segments, repairs = asr.parse_engine_subtitles(raw, 1000)
+    assert [s['source_text'] for s in segments] == ['สวัสดี', 'Hello', '另一个声音', '结束']
+    assert [(s['start_ms'], s['end_ms']) for s in segments] == [(0, 1), (500, 501), (500, 501), (999, 1000)]
+    assert all(s['asr_warnings'] == ['asr_timing_repaired'] for s in segments)
+    assert [(r['original_start_ms'], r['original_end_ms']) for r in repairs] == [(0, 0), (500, 500), (500, 500), (1000, 1000)]
+    assert [r['segment_id'] for r in repairs] == [s['segment_id'] for s in segments]
+    # External imports retain the strict end > start contract.
+    from fastapi import HTTPException
+    with pytest.raises(HTTPException):
+        asr.parse_subtitles(raw, 'external.srt')
+    with pytest.raises(HTTPException):
+        asr.parse_engine_subtitles(b'1\n00:00:02,000 --> 00:00:01,000\nreversed\n', 3000)
+
+
+def test_zero_duration_recognition_creates_review_project_with_source_evidence(prepared):
+    _, engine, _, _ = prepared
+    engine.write_text(engine.read_text(encoding='utf-8').replace('00:00:00,900', '00:00:00,100'), encoding='utf-8')
+    task = queue(prepared)
+    asr.run_one()
+    result = asr.get_task(task['task_id'])
+    assert result['status'] == 'completed', result
+    project = read_project(result['project_id'])
+    cue = project['segments'][0]
+    assert cue['source_text'] == 'สวัสดี Hello' and cue['review_status'] == 'needs_review'
+    assert (cue['start_ms'], cue['end_ms']) == (100, 101)
+    assert 'asr_timing_repaired' in cue['asr_warnings']
+    assert cue['asr_timing_reviewed'] is False
+    assert 'asr_timing_repaired' in cue['risk_flags']
+    provenance = project['track']['asr']
+    assert provenance['quality_review']['warning_counts']['asr_timing_repaired'] == 1
+    assert provenance['quality_review']['speaker_diarization'] is False
+    assert provenance['quality_review']['overlap_separation'] is False
+    assert provenance['timing_repairs'][0]['original_end_ms'] == 100
+    directory = Path(project['media']['path']).parent
+    assert b'00:00:00,100 --> 00:00:00,100' in (directory / 'original-subtitle').read_bytes()
+    assert (directory / 'asr-result.json').read_bytes() == json.dumps(
+        {'result': {'language': 'th'}, 'transcription': [{'text': 'สวัสดี 中文'}]},
+        ensure_ascii=False).encode('utf-8')
+
+
+def test_invalid_engine_timing_preserves_diagnostics_and_specific_error(prepared):
+    _, engine, _, _ = prepared
+    engine.write_text(engine.read_text(encoding='utf-8').replace('00:00:00,900', '00:00:00,050'), encoding='utf-8')
+    task = queue(prepared)
+    asr.run_one()
+    result = asr.get_task(task['task_id'])
+    assert result['status'] == 'failed' and result['project_id'] is None
+    assert 'Block 1' in result['error'] and 'end must be later than start' in result['error']
+    diagnostics = data_dir() / 'asr-diagnostics' / task['task_id']
+    assert (diagnostics / 'transcription.srt').is_file()
+    assert (diagnostics / 'transcription.json').is_file()
+    assert not (diagnostics / 'audio.wav').exists()
+    assert not (data_dir() / 'transcriptions' / task['task_id']).exists()
+    assert list_projects() == []
+
+
+def test_external_asr_directory_and_device_are_explicit(tmp_path, monkeypatch):
+    base = tmp_path / '语音 tools'
+    (base / 'bin').mkdir(parents=True)
+    (base / 'models').mkdir()
+    engine = base / 'bin' / ('whisper-cli.exe' if os.name == 'nt' else 'whisper-cli')
+    engine.write_bytes(b'test engine, never executed')
+    engine.chmod(0o755)
+    (base / 'models' / 'ggml-large-v3-turbo-q5_0.bin').write_bytes(b'\0' * (1024 * 1024))
+    monkeypatch.setenv('SUBTITLE_ASR_DIR', str(base))
+    monkeypatch.setenv('SUBTITLE_ASR_DEVICE', 'cpu')
+    monkeypatch.setattr(shutil, 'which', lambda command: str(tmp_path / command))
+    config = asr.configuration()
+    assert config['ready'] and config['device'] == 'cpu'
+    assert Path(config['engine_path']) == engine
+    assert Path(config['manifest_path']) == base / 'manifest.json'
+    monkeypatch.setenv('SUBTITLE_ASR_DEVICE', 'misspelled')
+    assert not asr.configuration()['ready']
+
+
+def test_cpu_request_and_utf8_installation_provenance(prepared, tmp_path):
+    _, engine, _, config = prepared
+    config['device'] = 'cpu'
+    manifest = tmp_path / '语音安装清单.json'
+    installation = {'platform': 'Windows x64', '说明': 'ภาษาไทย 中文'}
+    manifest.write_text(json.dumps(installation, ensure_ascii=False), encoding='utf-8')
+    config['manifest_path'] = str(manifest)
+    engine.write_text("import sys\nassert '-ng' in sys.argv\n" + engine.read_text(encoding='utf-8'), encoding='utf-8')
+    task = queue(prepared)
+    asr.run_one()
+    finished = asr.get_task(task['task_id'])
+    assert finished['status'] == 'completed', finished
+    project = read_project(finished['project_id'])
+    assert project['track']['asr']['installation'] == installation
+    result = json.loads((Path(project['media']['path']).parent / 'asr-result.json').read_text(encoding='utf-8'))
+    assert result['transcription'][0]['text'] == 'สวัสดี 中文'
+
+
 @pytest.mark.parametrize('container_offset', [0, 5])
 def test_selected_audio_delay_is_preserved_in_pcm_and_subtitle_timeline(prepared, tmp_path, container_offset):
     """Real FFmpeg conversion, mock recognizer that inspects its exact WAV input."""
@@ -301,5 +419,24 @@ time.sleep(60)
     assert asr.get_task(task['task_id'])['status'] == 'cancelled'
     assert list_projects() == []
     assert not (data_dir() / 'transcriptions' / task['task_id']).exists()
-    with pytest.raises(ProcessLookupError):
-        os.kill(int(pid_path.read_text()), 0)
+    pid = int(pid_path.read_text())
+    if os.name == 'nt':
+        # os.kill(pid, 0) is not a portable existence check on Windows.
+        import ctypes
+        from ctypes import wintypes
+        kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+        kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel.OpenProcess.restype = wintypes.HANDLE
+        kernel.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+        handle = kernel.OpenProcess(0x1000, False, pid)
+        if handle:
+            try:
+                code = wintypes.DWORD()
+                assert kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+                assert code.value != 259  # STILL_ACTIVE
+            finally:
+                kernel.CloseHandle(handle)
+    else:
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)

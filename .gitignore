@@ -16,6 +16,7 @@ test-results/
 .runtime/
 .cache/
 .playwright-mcp/
+.playwright-cli/
 recovered-subtitles/
 tools/asr/
 output/

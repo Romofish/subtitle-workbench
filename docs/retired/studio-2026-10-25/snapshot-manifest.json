@@ -1,0 +1,61 @@
+{
+  "captured_on": "2026-10-25",
+  "timezone": "Asia/Hong_Kong",
+  "note": "Snapshot of the working files before retirement; not a released Git commit. Markdown adds a retirement banner and rewrites relative links. JSON evidence is byte-preserved.",
+  "files": [
+    {
+      "original": "README.md",
+      "archive": "docs/retired/studio-2026-10-25/README.md",
+      "original_sha256": "0adc79c6a33ee1a343232659ef64f5e208617d84670d80a912b2dc3d4218bc9b",
+      "archived_sha256": "4f789ef8fd118c9cc37c91c27c4fb9620db1dbe7764380ce7a1baa6797109300"
+    },
+    {
+      "original": "multilingual-subtitle-tool-development-spec.md",
+      "archive": "docs/retired/studio-2026-10-25/multilingual-subtitle-tool-development-spec.md",
+      "original_sha256": "703f1e58ece62ec811e16bd6751b6286f692cab449374078d105e75fa275ecbc",
+      "archived_sha256": "b58af318ca068817864fd7ad23ae626eeebf5f870fa643d8898eed78e78b87b3"
+    },
+    {
+      "original": "free-tools-subtitle-workflow-plan.md",
+      "archive": "docs/retired/studio-2026-10-25/free-tools-subtitle-workflow-plan.md",
+      "original_sha256": "58ff4e165ed20a9910a7b5d92883bebda3abafc0225d45802ae8a92f12f4ba77",
+      "archived_sha256": "3bd872a3d4f444be5745a7a72fd54020a7f1554068ca2c25ac8b3900123d58b7"
+    },
+    {
+      "original": "docs/acceptance.md",
+      "archive": "docs/retired/studio-2026-10-25/docs/acceptance.md",
+      "original_sha256": "88794cd52271b12ec43e122d529f54ec0dbff68218a80ccf33cbdee3a2757bec",
+      "archived_sha256": "b13bc49a8a6009db50ce0fd560fdf967090df3e4c02a209d3e44f6dc8551a098"
+    },
+    {
+      "original": "docs/api-contract.md",
+      "archive": "docs/retired/studio-2026-10-25/docs/api-contract.md",
+      "original_sha256": "332d01a7c4f867a9d113f9f0b40a1db013ef300c141688c8b58c74d3cc583384",
+      "archived_sha256": "13a95097aeebf3088c7b3f1a50170935f2c70268117107d6f1b886e7329924a8"
+    },
+    {
+      "original": "docs/no-subtitle-workflow.md",
+      "archive": "docs/retired/studio-2026-10-25/docs/no-subtitle-workflow.md",
+      "original_sha256": "74de4d10207ff8c024a34765f717d2cbecc941db7ae0b2c2215b06b9a6d93bab",
+      "archived_sha256": "529216c9fd93fbf4f3a6936e8c076868f58b419bbc4ffb6966fa5adeff03d372"
+    },
+    {
+      "original": "docs/mac-setup.md",
+      "archive": "docs/retired/studio-2026-10-25/docs/mac-setup.md",
+      "original_sha256": "8ba66369ae9028385bfcbad79c759f7f31857fc4a2e531f656da2e9816f3e39c",
+      "archived_sha256": "e51412858b3a02a736f741447ef8300e077c13b12ee322d9b365dd240d74d6c2"
+    },
+    {
+      "original": "docs/windows-setup.md",
+      "archive": "docs/retired/studio-2026-10-25/docs/windows-setup.md",
+      "original_sha256": "4b73659c1453b6feeea34d0b2ca23e92ba240070ab7693d9ce3e16ee014c10a6",
+      "archived_sha256": "91ed2b65ffa47c8d84c66cb948358937ecd134374f92e6439ae346545563c6de"
+    },
+    {
+      "original": "docs/benchmark-results.json",
+      "archive": "docs/retired/studio-2026-10-25/docs/benchmark-results.json",
+      "original_sha256": "44dacbf2abed0b38e78ade41ab7dea59257e74e6acb51428ac2369630c8ceaf0",
+      "archived_sha256": "44dacbf2abed0b38e78ade41ab7dea59257e74e6acb51428ac2369630c8ceaf0"
+    }
+  ]
+}

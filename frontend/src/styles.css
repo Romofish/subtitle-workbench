@@ -642,7 +642,11 @@ kbd {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  pointer-events: none;
+  gap: 6px;
+  max-height: 70%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
   text-shadow: 0 2px 4px #000;
 }
 .subtitle-overlay>div {
@@ -654,8 +658,17 @@ kbd {
   line-height: 1.5;
   white-space: pre-line;
   max-width: 100%;
+  flex-shrink: 0;
+  overflow-wrap: anywhere;
+}
+.subtitle-overlay .subtitle-speaker {
+  display: block;
+  font-size: 11px;
+  font-weight: 600;
+  color: #e3d7f7;
 }
 .subtitle-overlay small {
+  display: block;
   margin-top: 4px;
   font-size: clamp(9px,.8vw,12px);
   background: rgba(18, 16, 23, .72);
@@ -851,6 +864,85 @@ kbd {
   flex-direction: column;
   flex: 1;
   min-height: 105px;
+}
+.cue-annotations-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 16px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+}
+.speaker-field {
+  display: flex;
+  flex: 1 1 150px;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  color: var(--secondary);
+  font-size: 11px;
+}
+.speaker-field small {
+  color: var(--muted);
+  font-size: 10px;
+  margin-left: 5px;
+}
+.speaker-field input {
+  width: 100%;
+  padding: 6px 8px;
+  font-size: 12px;
+}
+.listening-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding-bottom: 6px;
+}
+.listening-flags label,.export-speakers {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--secondary);
+  cursor: pointer;
+}
+.listening-flags input,.export-speakers input {
+  margin: 0;
+}
+.asr-review-note {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-basis: 100%;
+  font-size: 11px;
+  color: var(--amber);
+}
+.cue-annotations {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 5px;
+  white-space: normal;
+}
+.cue-annotations span {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  line-height: 1.6;
+  color: var(--amber);
+}
+.cue-annotations .speaker-badge {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: var(--tint);
+  color: var(--accent);
+}
+.export-speakers {
+  gap: 7px;
+  margin: 12px 0 7px;
 }
 .editor-source {
   border-bottom: 1px solid var(--border);
